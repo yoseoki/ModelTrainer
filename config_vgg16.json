@@ -1,0 +1,8 @@
+{
+    "learning_rate" : 0.01,
+    "epochs" : 100,
+    "batch_size" : 64,
+    "sampling_step" : 390,
+    "optimizer" : "SGD",
+    "criterion" : "CE"
+}
