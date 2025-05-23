@@ -7,19 +7,10 @@
 ./**/VGG16*/
 ./**/RESNET18*/
 ./**/UNET*/
-./**/VGG16*/
-./**/RESNET18*/
-./**/UNET*/
+./**/VIT*/
+./**/LENET*/
+./**/LENET_REVISED*/
 ./**/DB*/
-./**/DB*/
-run_train/**/VGG16*/
-run_train/**/RESNET18*/
-run_train/**/UNET*/
-run_train/**/DB*/
-run_analysis/**/VGG16*/
-run_analysis/**/RESNET18*/
-run_analysis/**/UNET*/
-run_analysis/**/DB*/
 
 # ignore DB folder
 DB/
