@@ -1,5 +1,5 @@
 import sys, os
-sys.path.append(os.path.dirname(os.path.abspath(os.path.dirname(__file__))))
+os.path.abspath(os.path.dirname(__file__))
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,7 +7,7 @@ import torchvision
 import torchvision.transforms as transforms
 import random as rd
 import numpy as np
-from module.model import CNNModel as nmc
+from util import CNNModel as nmc
 import matplotlib.pyplot as plt
 import math
 import json
@@ -172,6 +172,16 @@ class LeNetLoader(modelLoader):
 	def _build_non_save_layers(self):
 		self.non_save_layers = ["bias"]
 
+class LeNetRevisedLoader(modelLoader):
+
+	@overrides
+	def _build_new_model(self):
+		self.model = nmc.LeNetRevised(num_classes=self.num_classes)
+
+	@overrides
+	def _build_non_save_layers(self):
+		self.non_save_layers = ["bias"]
+
 # for class which inherit trainer class(ex. CIFAR10Trainer, MNISTTrainer, ...)
 # need to implement load_DB method, build_num_classes method
 # and can train by training method
@@ -242,6 +252,8 @@ class trainer:
 			self.model_loader = VGG16Loader(self.prefix_w, self.num_classes)
 		elif model_name.upper() == "VIT":
 			self.model_loader = ViTLoader(self.prefix_w, self.num_classes)
+		elif model_name.upper() == "LENET_REVISED":
+			self.model_loader = LeNetRevisedLoader(self.prefix_w, self.num_classes)
 		elif model_name.upper() == "LENET":
 			self.model_loader = LeNetLoader(self.prefix_w, self.num_classes)
 
@@ -378,12 +390,12 @@ class CIFAR10Trainer(trainer):
 		transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
 		])
 
-		trainset = torchvision.datasets.CIFAR10(root='../DB', train=True,
+		trainset = torchvision.datasets.CIFAR10(root='DB', train=True,
 												download=True, transform=transform)
 		trainloader = torch.utils.data.DataLoader(trainset, batch_size=self.batch_size,
 												shuffle=True, num_workers=2)
 
-		testset = torchvision.datasets.CIFAR10(root='../DB', train=False,
+		testset = torchvision.datasets.CIFAR10(root='DB', train=False,
 											download=True, transform=transform)
 		testloader = torch.utils.data.DataLoader(testset, batch_size=self.batch_size,
 												shuffle=True, num_workers=2)

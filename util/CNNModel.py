@@ -1001,6 +1001,41 @@ class LeNet(nn.Module):
 		out = self.fc3(out)       
 		return out
 	
+class LeNetRevised(nn.Module):
+	def __init__(self, num_classes=10):
+		super(LeNetRevised, self).__init__()
+		
+		# in : (3,32,32) out : (16,32,32)
+		self.cnn1 = nn.Conv2d(in_channels=3, out_channels=16, kernel_size=3, stride=1, padding=1) 
+		self.relu1 = nn.ReLU()
+		self.maxpool1 = nn.MaxPool2d(kernel_size=2) # 32/2 -> (16,16,16)
+		
+		# in : (16,16,16) out : (16,16,16)
+		self.cnn2 = nn.Conv2d(in_channels=16, out_channels=16, kernel_size=3, stride=1, padding=1) 
+		self.relu2 = nn.ReLU()
+		self.maxpool2 = nn.MaxPool2d(kernel_size=2) # 16/2 -> (16,8,8)
+
+		# in : (16,8,8) out : (16,6,6)
+		self.cnn3 = nn.Conv2d(in_channels=16, out_channels=16, kernel_size=3, stride=1, padding=0) 
+		self.relu3 = nn.ReLU()
+		self.maxpool3 = nn.MaxPool2d(kernel_size=2) # 6/2 -> (16,3,3)
+		
+		self.fc1 = nn.Linear(16*3*3, num_classes) 
+		
+	def forward(self, x):
+		out = self.cnn1(x) 
+		out = self.relu1(out)
+		out = self.maxpool1(out)
+		out = self.cnn2(out) 
+		out = self.relu2(out) 
+		out = self.maxpool2(out)
+		out = self.cnn3(out) 
+		out = self.relu3(out) 
+		out = self.maxpool3(out) 
+		out = out.view(out.size(0), -1) # 완결연결층에 데이터를 전달하기 위해 데이터 형태를 1차원으로 바꿉니다.
+		out = self.fc1(out)
+		return out
+	
 class Per_patch_Fully_connected(nn.Module) :
     def __init__(self, input_size, patch_size, C) :
         super(Per_patch_Fully_connected, self).__init__()
