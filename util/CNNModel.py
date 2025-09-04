@@ -8,6 +8,9 @@ import torch.nn.functional as F
 from einops import rearrange, reduce, repeat
 from einops.layers.torch import Rearrange, Reduce
 from torchsummary import summary
+from typing import Union
+import torch.nn.init as init
+import math
 
 # structure : conv(3,4) - conv(4,8) - conv(8,16) - fc(1728,itemNum)
 # #param : 108+4 - 288+8 - 1152+16 - 1728*itemNum + itemNum
@@ -557,7 +560,7 @@ class BasicBlock(nn.Module):
 	def __init__(self, in_channels, out_channels, downsample=None):
 		
 		super(BasicBlock,self).__init__()
-		self.conv1= nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
+		self.convfirst= nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
 		self.bn1= nn.BatchNorm2d(out_channels)
 		self.relu = nn.ReLU(inplace=True)
 		self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
@@ -567,7 +570,7 @@ class BasicBlock(nn.Module):
 	def forward(self, x):
 		
 		identity = x
-		out = self.conv1(x)
+		out = self.convfirst(x)
 		out = self.bn1(out)
 		out = self.relu(out)
 		out = self.conv2(out)
@@ -779,7 +782,7 @@ class VGG16(nn.Module):
 			self.conv_3_block(4*base_dim,8*base_dim), #512
 			self.conv_3_block(8*base_dim,8*base_dim), #512
 		)
-		self.orth_basis = self.random_orthonormal_basis(4096, num_classes)
+		# self.orth_basis = self.random_orthonormal_basis(4096, num_classes)
 		self.connect_fc = nn.Linear(8*base_dim*1*1, 10)
 		self.fc_relu = nn.ReLU(True)
 		# self.connect_fc = nn.Sequential(
@@ -911,13 +914,45 @@ class ResidualAdd(nn.Module):
         return x
 
 class FeedForwardBlock(nn.Sequential):
-    def __init__(self, emb_size: int, expansion: int = 4, drop_p: float = 0.):
-        super().__init__(
-            nn.Linear(emb_size, expansion * emb_size),
-            nn.GELU(),
-            nn.Dropout(drop_p),
-            nn.Linear(expansion * emb_size, emb_size),
-        )
+	def __init__(self, emb_size: int, expansion: int = 4, drop_p: float = 0., basis: Union[Tensor, None] = None):
+		if basis is None:
+			super().__init__(
+				nn.Linear(emb_size, expansion * emb_size),
+				nn.GELU(),
+				nn.Dropout(drop_p),
+				nn.Linear(expansion * emb_size, emb_size),
+			)
+		else:
+			super().__init__(
+				LinearWithBasis(torch.transpose(basis, 0, 1)),
+				nn.GELU(),
+				nn.Dropout(drop_p),
+				LinearWithBasis(basis),
+			)
+
+class LinearWithBasis(nn.Module):
+	def __init__(self, basis : Tensor): # basis means A^T
+		super().__init__()
+		self.basis = basis
+		device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+		factory_kwargs = {"device": device}
+		self.in_features = basis.shape[0]
+		self.out_features = basis.shape[1]
+		dim = min(self.in_features, self.out_features)
+		self.coff = torch.nn.parameter.Parameter(torch.empty((dim, dim), **factory_kwargs))
+		self.reset_parameters()
+
+	def reset_parameters(self) -> None:
+		init.kaiming_uniform_(self.coff, a=math.sqrt(5))
+
+	def forward(self, x : Tensor) -> Tensor:
+		if self.in_features <= self.out_features:
+			weight = self.coff @ self.basis
+		else:
+			weight = self.basis @ self.coff
+		output = x @ weight
+		return output
+
 
 class TransformerEncoderBlock(nn.Sequential):
     def __init__(self,
@@ -925,6 +960,7 @@ class TransformerEncoderBlock(nn.Sequential):
                  drop_p: float = 0.,
                  forward_expansion: int = 4,
                  forward_drop_p: float = 0.,
+				 basis: Union[Tensor, None] = None,
                  ** kwargs):
         super().__init__(
             ResidualAdd(nn.Sequential(
@@ -935,14 +971,25 @@ class TransformerEncoderBlock(nn.Sequential):
             ResidualAdd(nn.Sequential(
                 nn.LayerNorm(emb_size),
                 FeedForwardBlock(
-                    emb_size, expansion=forward_expansion, drop_p=forward_drop_p),
+                    emb_size, expansion=forward_expansion, drop_p=forward_drop_p, basis=basis),
                 nn.Dropout(drop_p)
             )
             ))
 
 class TransformerEncoder(nn.Sequential):
-    def __init__(self, depth: int = 12, **kwargs):
-        super().__init__(*[TransformerEncoderBlock(**kwargs) for _ in range(depth)])
+	def __init__(self, depth: int = 12, **kwargs):
+		# self.basis = self.generate_orthonormal_basis(768, 192)
+		self.basis = None
+		super().__init__(*[TransformerEncoderBlock(basis=self.basis, **kwargs) for _ in range(depth)])
+	
+	# def generate_orthonormal_basis(self, n: int, p: int) -> Tensor:
+	# 	A = np.random.randn(n, p)
+	# 	Q, _ = np.linalg.qr(A)
+	# 	basis = Tensor(Q[:, :p])
+	# 	device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+	# 	basis = basis.to(device)
+	# 	basis.requires_grad = False
+	# 	return basis
 
 class ClassificationHead(nn.Sequential):
     def __init__(self, emb_size: int = 768, n_classes: int = 1000):
@@ -1088,3 +1135,106 @@ class channel_mixing_MLP(nn.Module) :
         output = self.MLP(output)
 
         return output + x
+	
+class Conv_block(nn.Module):
+    def __init__(self, in_channels, out_channels, activation=True, **kwargs) -> None:
+        super(Conv_block, self).__init__()
+        self.relu = nn.ReLU()
+        self.conv = nn.Conv2d(in_channels, out_channels, **kwargs) # kernel size = ...
+        self.batchnorm = nn.BatchNorm2d(out_channels)
+        self.activation = activation
+
+    def forward(self, x):
+        if not self.activation:
+            return self.batchnorm(self.conv(x))
+        return self.relu(self.batchnorm(self.conv(x)))
+
+
+class Res_block(nn.Module):
+    def __init__(self, in_channels, red_channels, out_channels, is_plain=False):
+        super(Res_block,self).__init__()
+        self.relu = nn.ReLU()
+        self.is_plain = is_plain
+        
+        if in_channels==64:
+            self.convseq = nn.Sequential(
+                                    Conv_block(in_channels, red_channels, kernel_size=1, padding=0),
+                                    Conv_block(red_channels, red_channels, kernel_size=3, padding=1),
+                                    Conv_block(red_channels, out_channels, activation=False, kernel_size=1, padding=0)
+            )
+            self.iden = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1)
+        elif in_channels == out_channels:
+            self.convseq = nn.Sequential(
+                                    Conv_block(in_channels, red_channels, kernel_size=1, padding=0),
+                                    Conv_block(red_channels, red_channels, kernel_size=3, padding=1),
+                                    Conv_block(red_channels, out_channels, activation=False, kernel_size=1, padding=0)
+            )
+            self.iden = nn.Identity()
+        else:
+            self.convseq = nn.Sequential(
+                                    Conv_block(in_channels, red_channels, kernel_size=1, padding=0, stride=2),
+                                    Conv_block(red_channels, red_channels, kernel_size=3, padding=1),
+                                    Conv_block(red_channels, out_channels, activation=False, kernel_size=1, padding=0)
+                
+            )
+            self.iden = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=2)
+        
+    def forward(self, x):
+        y = self.convseq(x)
+        if self.is_plain:
+            x = y
+        else:
+            x = y + self.iden(x)
+        x = self.relu(x)  # relu(skip connection)
+        return x
+	
+
+class RESNET50(nn.Module):
+    def __init__(self, in_channels=3 , num_classes=1000, is_plain=False):
+        self.num_classes = num_classes
+        super(RESNET50, self).__init__()
+        self.conv1 = Conv_block(in_channels=in_channels, out_channels=64, kernel_size=7, stride=2, padding=3)
+        self.maxpool1 = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        
+        self.conv2_x = nn.Sequential(
+                                        Res_block(64, 64, 256, is_plain),
+                                        Res_block(256, 64, 256, is_plain),
+                                        Res_block(256, 64, 256, is_plain)
+        )
+        
+        self.conv3_x = nn.Sequential(
+                                        Res_block(256, 128, 512, is_plain),
+                                        Res_block(512, 128, 512, is_plain),
+                                        Res_block(512, 128, 512, is_plain),
+                                        Res_block(512, 128, 512, is_plain)
+        )
+
+        self.conv4_x = nn.Sequential(
+                                        Res_block(512, 256, 1024, is_plain),
+                                        Res_block(1024, 256, 1024, is_plain),
+                                        Res_block(1024, 256, 1024, is_plain),
+                                        Res_block(1024, 256, 1024, is_plain),
+                                        Res_block(1024, 256, 1024, is_plain),
+                                        Res_block(1024, 256, 1024, is_plain)
+        )
+        
+        self.conv5_x = nn.Sequential(
+                                        Res_block(1024, 512, 2048, is_plain),
+                                        Res_block(2048, 512, 2048, is_plain),
+                                        Res_block(2048, 512, 2048, is_plain),
+        )
+
+        self.avgpool = nn.AvgPool2d((1,1))
+        self.fc = nn.Linear(2048,num_classes)
+
+    def forward(self,x):
+        x = self.conv1(x)
+        x = self.maxpool1(x)
+        x = self.conv2_x(x)
+        x = self.conv3_x(x)
+        x = self.conv4_x(x)
+        x = self.conv5_x(x)
+        x = self.avgpool(x)
+        x = x.reshape(x.shape[0], -1)
+        x = self.fc(x)
+        return x
