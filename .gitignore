@@ -11,6 +11,19 @@
 ./**/LENET*/
 ./**/LENET_REVISED*/
 ./**/DB*/
+./VGG16*/
+./RESNET18*/
+./UNET*/
+./VIT*/
+./LENET*/
+./LENET_REVISED*/
+./DB*/
+./resnet18_small*/
+./vgg16*/
+./vit*/
+./**/resnet18_small*/
+./**/vgg16*/
+./**/vit*/
 
 # ignore DB folder
 DB/
