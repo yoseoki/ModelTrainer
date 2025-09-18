@@ -7,7 +7,7 @@ from SUBSPACE import SubspaceDiff
 
 class OrthBasisBuffer:
     
-    def __init__(self, model, save_layers, non_save_layers, square_flag, salt_policy):
+    def __init__(self, model, save_layers, non_save_layers, square_flag, salt_policy, mag_mode="orth", reshape_mode="in_dim"):
         self.model = model
         self.save_layers = save_layers
         self.non_save_layers = non_save_layers
@@ -15,6 +15,8 @@ class OrthBasisBuffer:
         self.baseMagnitude = {}
         self.square_flag = square_flag
         self.salt_policy = salt_policy
+        self.mag_mode = mag_mode
+        self.reshape_mode = reshape_mode
 
         self.pcaTool = WeightPCA()
         self.smTool = SubspaceDiff()
@@ -29,7 +31,7 @@ class OrthBasisBuffer:
                 if element in name: nonSaveFoundFlag = True
             if not saveFoundFlag or nonSaveFoundFlag: continue
 
-            print("found!")
+            print("found! : {}".format(name))
 
             self.buffer[name] = []
             self.baseMagnitude[name] = 1
@@ -79,18 +81,28 @@ class OrthBasisBuffer:
             param_copied = param.detach().clone()
             param_cupy = cp.asarray(param_copied.cpu().numpy())
 
+            # Current Settings
+            # Data centerizing : False
             if "feature" in name or "conv" in name: # convolution layer
                 out_channels = param_cupy.shape[0]
                 in_channels = param_cupy.shape[1]
                 ker_size = param_cupy.shape[2] * param_cupy.shape[3]
 
-                tmp = cp.swapaxes(param_cupy, 0, 1)
-                dataArray = cp.transpose(cp.reshape(tmp, (in_channels, out_channels * ker_size)))
-                _, basis = self.pcaTool.pca_basic(dataArray)
-                basis = basis[:,:in_channels-1]
+                if self.reshape_mode == "in_dim" :
+                    tmp = cp.swapaxes(param_cupy, 0, 1)
+                    dataArray = cp.transpose(cp.reshape(tmp, (in_channels, out_channels * ker_size)))
+                    _, basis = self.pcaTool.pca_basic(dataArray)
+                if self.reshape_mode == "out_dim" :
+                    dataArray = cp.transpose(cp.reshape(param_cupy, (out_channels, in_channels * ker_size)))
+                    _, basis = self.pcaTool.pca_basic(dataArray)
+                if self.reshape_mode == "ker_dim" : 
+                    dataArray = cp.transpose(cp.reshape(param_cupy, (in_channels * out_channels, ker_size)))
+                    _, basis = self.pcaTool.pca_basic(dataArray)
             else: # fc layer
                 out_dims = param_cupy.shape[0]
                 in_dims = param_cupy.shape[1]
+
+                # for fc layer, It is impossible to select axis for deciding number of data
                 if in_dims < out_dims:
                     dataArray = param_cupy
                     _, basis = self.pcaTool.pca_basic(dataArray)
@@ -134,27 +146,24 @@ class OrthBasisBuffer:
             basis_cur = self.buffer[name][-2]
             basis_next = self.buffer[name][-1]
 
-            # 1st magnitude 를 계산(비사용)
-            # mag = self.smTool.calc_magnitude(basis_prev, basis_next)
-            # mag = mag.get()
-
-            # 2nd magnitude 를 계산(비사용)
-            # _, k = self.smTool.calc_karcher_subspace(basis_prev, basis_next)
-            # mag = self.smTool.calc_magnitude(basis_cur, k)
-            # mag = mag.get()
-
-            # for debugging
-            # !
-            # print("({:.4f})".format(mag), end="  ")
-
-            # 2nd magnitude 의 along, orth component 를 계산
-            along, orth = self.smTool.calc_2nd_magnitude_decomposed(basis_prev, basis_cur, basis_next)
-            along = along.get()
-            orth = orth.get()
-            
-            # # for debugging
-            # !
-            # print("(({:.4f}, {:.4f}))".format(along, orth), end="  ")
+            if "orth" in self.mag_mode:  # (2nd magnitude 의) along, orth component 를 계산
+                along, orth = self.smTool.calc_2nd_magnitude_decomposed(basis_prev, basis_cur, basis_next)
+                along = along.get()
+                orth = orth.get()
+                # # for debugging
+                # !
+                # print("(({:.4f}, {:.4f}))".format(along, orth), end="  ")
+            else:   
+                if "1" == self.mag_mode[-1]: # 1st magnitude 를 계산
+                    mag = self.smTool.calc_magnitude(basis_prev, basis_next)
+                    mag = mag.get()
+                else: # 2nd magnitude 를 계산
+                    _, k = self.smTool.calc_karcher_subspace(basis_prev, basis_next)
+                    mag = self.smTool.calc_magnitude(basis_cur, k)
+                    mag = mag.get()
+                # for debugging
+                # !
+                # print("({:.4f})".format(mag), end="  ")      
             
             # 예전 계산 방식 1
             # orth component 의 logit 을 사용
@@ -178,13 +187,18 @@ class OrthBasisBuffer:
             # 아직 수렴하지 않았다고 판단, 조기 수렴 방지를 위해
             # orth component = 1e-4 를 사용
             if self.square_flag:
-                if abs(orth) < 1e-4 and abs(along) > 1e-4: logit = np.sqrt(1e-4 / self.baseMagnitude[name])
-                else: logit = np.sqrt(abs(orth) / self.baseMagnitude[name])
-                # logit = np.sqrt(abs(mag) / self.baseMagnitude[name])
+                if "orth" in self.mag_mode:
+                    if abs(orth) < 1e-4 and abs(along) > 1e-4: logit = np.sqrt(1e-4 / self.baseMagnitude[name])
+                    else: logit = np.sqrt(abs(orth) / self.baseMagnitude[name])
+                else:
+                    logit = np.sqrt(abs(mag) / self.baseMagnitude[name])
             else:
-                if abs(orth) < 1e-4 and abs(along) > 1e-4: logit = 1e-4 / self.baseMagnitude[name]
-                else: logit = abs(orth) / self.baseMagnitude[name]
-                # logit = abs(mag) / self.baseMagnitude[name]
+                if "orth" in self.mag_mode:
+                    if abs(orth) < 1e-4 and abs(along) > 1e-4: logit = 1e-4 / self.baseMagnitude[name]
+                    else: logit = abs(orth) / self.baseMagnitude[name]
+                else:
+                    logit = abs(mag) / self.baseMagnitude[name]
+
             result.append(logit)
             self.buffer[name].pop(0)
         
@@ -226,34 +240,40 @@ class OrthBasisBuffer:
             basis_cur = self.buffer[name][-2]
             basis_next = self.buffer[name][-1]
 
-            # 1st magnitude 를 계산(비사용)
-            # mag = self.smTool.calc_magnitude(basis_prev, basis_next)
-            # mag = mag.get()
+            if "orth" in self.mag_mode:  # (2nd magnitude 의) along, orth component 를 계산
+                along, orth = self.smTool.calc_2nd_magnitude_decomposed(basis_prev, basis_cur, basis_next)
+                along = along.get()
+                orth = orth.get()
+                # # for debugging
+                # !
+                # print("(({:.4f}, {:.4f}))".format(along, orth), end="  ")
+            else:   
+                if "1" == self.mag_mode[-1]: # 1st magnitude 를 계산
+                    mag = self.smTool.calc_magnitude(basis_prev, basis_next)
+                    mag = mag.get()
+                else: # 2nd magnitude 를 계산
+                    _, k = self.smTool.calc_karcher_subspace(basis_prev, basis_next)
+                    mag = self.smTool.calc_magnitude(basis_cur, k)
+                    mag = mag.get()
+                # for debugging
+                # !
+                # print("({:.4f})".format(mag), end="  ")
 
-            # 2nd magnitude 를 계산(비사용)
-            # _, k = self.smTool.calc_karcher_subspace(basis_prev, basis_next)
-            # mag = self.smTool.calc_magnitude(basis_cur, k)
-            # mag = mag.get()
-
-            # # for debugging
-            # print("({:.4f})".format(mag), end="  ")
-
-            # 2nd magnitude 의 along, orth component 를 계산
-            along, orth = self.smTool.calc_2nd_magnitude_decomposed(basis_prev, basis_cur, basis_next)
-            along = along.get()
-            orth = orth.get()
-
-            # for debugging
-            print("(({:.4f}, {:.4f}))".format(along, orth), end="  ")
-
-            # 기준점 : 초기 orth component of 2nd magnitude
+            # 기준점 : 초기 orth(mag) component of 2nd magnitude
             # 단, 1e-4 보다 작은 값은 오차라고 보고 사용하지 않음
-            logit = orth
-            # logit = mag
+            if "orth" in self.mag_mode: logit = orth
+            else: logit = mag
+
             if logit < 1e-4: logit = 1e-4
             self.baseMagnitude[name] = logit
 
     def set_basis_manually(self, basisList):
+        """
+        직접 "기준점" 을 계산하지 않고 인자로써 "기준점 배열" 을 전달받아
+        클래스 내 사전형 변수에 저장하는 메소드.
+        이 정보는 accelerate coef 의 기준점으로써,
+        적절히 scaling 하는 데에 사용된다.
+        """
 
         cnt = 0
 

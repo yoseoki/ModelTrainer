@@ -275,6 +275,8 @@ class trainer:
 		self.criterion = self.config["criterion"] # options : "CE"
 		if "offset" in self.config or "interval" in self.config:
 			self.mode = "ACCELERATE"
+			self.mag_mode = self.config["mag_mode"] if "mag_mode" in self.config else "orth"
+			self.reshape_mode = self.config["reshape_mode"] if "reshape_mode" in self.config else "in_dim"
 			self.offset = int(self.config["offset"]) if "offset" in self.config else 1
 			self.interval = int(self.config["interval"]) if "interval" in self.config else 1
 			if "square_flag" in self.config:
@@ -453,7 +455,7 @@ class trainer:
 			optimizer = self.load_optimizer(model)
 		elif self.mode == "ACCELERATE":
 			save_name, optimizer = self.load_layerwise_optimizer(model_name, model)
-			obb = buf.OrthBasisBuffer(model, save_name, self.model_loader.non_save_layers, self.square_flag, self.salt_policy)
+			obb = buf.OrthBasisBuffer(model, save_name, self.model_loader.non_save_layers, self.square_flag, self.salt_policy, reshape_mode=self.reshape_mode, mag_mode=self.mag_mode)
 			obb.update()
 
 		# self.model_loader.save_weight(-1, is_verbose=is_verbose, is_init=True)
@@ -486,6 +488,7 @@ class trainer:
 					if epoch == self.offset - 1 or (epoch > self.offset - 1 and (epoch - self.offset) % self.interval == 0):
 						mag_buffer = []
 						for _ in range(len(save_name)): mag_buffer.append([])
+						obb.clear_buffer()
 
 			model.train()
 			avg_cost = 0
@@ -524,7 +527,6 @@ class trainer:
 					if self.mode == "ACCELERATE":
 						if self.calc_policy == "epoch":
 							obb.update()
-					pass
 			
 			if self.mode == "ACCELERATE":
 				if self.calc_policy == "step":
@@ -578,7 +580,7 @@ class trainer:
 			if "finalMagContainer" in locals():
 				learningStopFlag = True
 				for mag in finalMagContainer:
-					if mag > 0.001: learningStopFlag = False
+					if mag > 0.01: learningStopFlag = False
 				if learningStopFlag: break
 
 		print("========== training over! ==========")
