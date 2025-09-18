@@ -1,0 +1,14 @@
+{
+    "learning_rate" : 0.01,
+    "epochs" : 60,
+    "batch_size" : 64,
+    "sampling_step" : [390],
+    "optimizer" : "SGD",
+    "criterion" : "CE",
+    "offset" : 5,
+    "interval" : 1,
+    "square_flag" : "True",
+    "salt_policy" : "direct",
+    "calc_policy" : "step",
+    "calc_interval" : 50
+}
