@@ -82,30 +82,39 @@ class WeightPCA():
             if printCounter > 9: break
         
     def pca_basic(self, dataArray, isVerbose=False): #  just doing PCA(doing eigen composition about auto-correlation matrix)
+
+        dimension = dataArray.shape[0]
+        dataNum = dataArray.shape[1]
+
         dataArray_centerized = dataArray # self.centerize(dataArray)
+
         r = dataArray_centerized@cp.transpose(dataArray_centerized)
         values, basis = cp.linalg.eigh(r)
         values = values[::-1]
         basis = basis[:, ::-1]
-        index = 0
-        changeFlag = False
-        for i, l in enumerate(values):
-            if l < 1e-4:
-                index = i
-                changeFlag = True
-                break
-        if not changeFlag: index = values.shape[0]
+
+        # for debugging
+        # index = 0
+        # changeFlag = False
+        # for i, l in enumerate(values):
+        #     if l < 1e-4:
+        #         index = i
+        #         changeFlag = True
+        #         break
+        # if not changeFlag: index = values.shape[0]
         # print("index : {}".format(index))
 
-        dataNum = dataArray.shape[1]
         values = values[:dataNum]
         basis = basis[:,:dataNum]
+
+        # for debugging
         if isVerbose:
             print("="*20)
             self.print_intrinsic_dimension(values)
-            # self.print_eigenvalue(values)
+            self.print_eigenvalue(values)
             print(values[0])
-            print("="*20) 
+            print("="*20)
+
         return [values, basis]
     
     def pca_print_nondiag(self, dataArray, isVerbose=False): #  just doing PCA(doing eigen composition about auto-correlation matrix)
