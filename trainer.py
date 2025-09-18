@@ -320,7 +320,7 @@ class trainer:
 
 	def load_optimizer(self, model):
 		if self.optimizer == "SGD":
-			return torch.optim.SGD(model.parameters(), lr=self.lr, momentum=0.9, weight_decay=5*1e-4)
+			return torch.optim.SGD(model.parameters(), lr=self.lr, momentum=0.9)
 		elif self.optimizer == "ADAM":
 			return torch.optim.Adam(model.parameters(), lr=self.lr)
 	
