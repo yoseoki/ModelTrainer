@@ -320,7 +320,7 @@ class trainer:
 
 	def load_optimizer(self, model):
 		if self.optimizer == "SGD":
-			return torch.optim.SGD(model.parameters(), lr=self.lr, momentum=0.9)
+			return torch.optim.SGD(model.parameters(), lr=self.lr, momentum=0.9, weight_decay=5*1e-4)
 		elif self.optimizer == "ADAM":
 			return torch.optim.Adam(model.parameters(), lr=self.lr)
 	
@@ -457,6 +457,7 @@ class trainer:
 			save_name, optimizer = self.load_layerwise_optimizer(model_name, model)
 			obb = buf.OrthBasisBuffer(model, save_name, self.model_loader.non_save_layers, self.square_flag, self.salt_policy, reshape_mode=self.reshape_mode, mag_mode=self.mag_mode)
 			obb.update()
+		scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=200, eta_min=0)
 
 		# self.model_loader.save_weight(-1, is_verbose=is_verbose, is_init=True)
 
@@ -582,6 +583,8 @@ class trainer:
 				for mag in finalMagContainer:
 					if mag > 0.01: learningStopFlag = False
 				if learningStopFlag: break
+			
+			scheduler.step()
 
 		print("========== training over! ==========")
 		self.save_training_result()
