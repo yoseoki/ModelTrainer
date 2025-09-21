@@ -1,14 +1,16 @@
  {
     "learning_rate" : 0.05,
-    "epochs" : 60,
+    "epochs" : 50,
     "batch_size" : 100,
     "sampling_step" : [250],
     "optimizer" : "SGD",
     "criterion" : "CE",
     "offset" : 5,
-    "interval" : 1,
-    "square_flag" : "False",
-    "salt_policy" : "none",
+    "interval" : 5,
+    "square_flag" : "True",
+    "salt_policy" : "direct",
     "calc_policy" : "epoch",
-    "calc_interval" : 1
+    "calc_interval" : 5,
+    "mag_mode" : "1",
+    "reshape_mode" : "ker_dim"
 }
