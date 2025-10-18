@@ -40,6 +40,11 @@ class SubspaceDiff():
     
     def calc_karcher_subspace(self, basis1, basis2):
 
+        if basis1.shape[1] == 1 and basis2.shape[1] == 1:
+            result = (basis1 + basis2) / 2
+            result = result / cp.linalg.norm(result)
+            return [[1], result]
+
         G = basis1@cp.transpose(basis1) + basis2@cp.transpose(basis2)
         a, l = cp.linalg.eigh(G)
         alphas = a[::-1]
@@ -101,7 +106,7 @@ class SubspaceDiff():
 
         return [cp.array(eigenvalues_new), cp.transpose(cp.array(eigenvectors_new))]
 
-    def calc_magnitude(self, basis1, basis2, isVerbose=False, overlapFlag=False):
+    def calc_magnitude(self, basis1, basis2, isVerbose=False, overlapFlag=True):
         
         if not overlapFlag:
 
