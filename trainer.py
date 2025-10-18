@@ -369,7 +369,7 @@ class trainer:
 			elif model_name.upper() == "VIT":
 				name = []
 				name.append("0.positions")
-				for i in range(12): 
+				for i in range(12):
 					name.append("1.{}.1.fn.1.0.weight".format(i))
 				name.append("2.2.weight")
 				return name, torch.optim.SGD([
@@ -387,6 +387,15 @@ class trainer:
 					{'params': model[1][10].parameters(), 'lr': self.lr, 'momentum' : 0.9},
 					{'params': model[1][11].parameters(), 'lr': self.lr, 'momentum' : 0.9},
 					{'params': model[2].parameters(), 'lr': self.lr, 'momentum' : 0.9}
+					])
+			elif model_name.upper() == "LENET":
+				name = ["cnn1", "cnn2", "fc1", "fc2", "fc3"]
+				return name, torch.optim.SGD([
+					{'params': model.cnn1.parameters(), 'lr': self.lr, 'momentum' : 0.9},
+					{'params': model.cnn2.parameters(), 'lr': self.lr, 'momentum' : 0.9},
+					{'params': model.fc1.parameters(), 'lr': self.lr, 'momentum' : 0.9},
+					{'params': model.fc2.parameters(), 'lr': self.lr, 'momentum' : 0.9},
+					{'params': model.fc3.parameters(), 'lr': self.lr, 'momentum' : 0.9}
 					])
 			
 	def update_optimizer(self, optimizer, magContainer):
@@ -459,7 +468,7 @@ class trainer:
 			obb.update()
 		scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=200, eta_min=0)
 
-		# self.model_loader.save_weight(-1, is_verbose=is_verbose, is_init=True)
+		self.model_loader.save_weight(-1, is_verbose=is_verbose, is_init=True)
 
 		print("========== training start! ==========")
 
@@ -524,7 +533,7 @@ class trainer:
 								for j, mag in enumerate(magContainer): mag_buffer[j].append(mag)
 
 				if i in self.sampling_step:
-					# self.model_loader.save_weight(len(self.sampling_step)*epoch + self.sampling_step.index(i), is_verbose=is_verbose)
+					self.model_loader.save_weight(len(self.sampling_step)*epoch + self.sampling_step.index(i), is_verbose=is_verbose)
 					if self.mode == "ACCELERATE":
 						if self.calc_policy == "epoch":
 							obb.update()

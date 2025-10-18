@@ -42,6 +42,7 @@ class OrthBasisBuffer:
             if model_name.upper() == "RESNET18_SMALL": return [1, 1, 1, 1, 1, 1]
             elif model_name.upper() == "VGG16": return [1, 1, 1, 1, 1, 1]
             elif model_name.upper() == "VIT": return [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+            elif model_name.upper() == "LENET": return [1, 1, 1, 1, 1]
         elif self.salt_policy == "direct":
             if model_name.upper() == "RESNET18_SMALL": return [16, 16, 8, 4, 2, 20]
             elif model_name.upper() == "VGG16": return [4, 2, 1, 0.5, 0.5, 10]
@@ -64,6 +65,7 @@ class OrthBasisBuffer:
         buffer 에 append 하는 메소드.
         즉, 말 그대로 buffer 를 update 하는 메소드이다.
         """
+        print()
 
         for name, param in self.model.named_parameters(): # iteration : each parameter
             
@@ -83,7 +85,7 @@ class OrthBasisBuffer:
 
             # Current Settings
             # Data centerizing : False
-            if "feature" in name or "conv" in name: # convolution layer
+            if "feature" in name or "conv" in name or "cnn" in name: # convolution layer
                 out_channels = param_cupy.shape[0]
                 in_channels = param_cupy.shape[1]
                 ker_size = param_cupy.shape[2] * param_cupy.shape[3]
@@ -92,23 +94,46 @@ class OrthBasisBuffer:
                     tmp = cp.swapaxes(param_cupy, 0, 1)
                     dataArray = cp.transpose(cp.reshape(tmp, (in_channels, out_channels * ker_size)))
                     _, basis = self.pcaTool.pca_basic(dataArray)
-                if self.reshape_mode == "out_dim" :
+                elif self.reshape_mode == "out_dim" :
                     dataArray = cp.transpose(cp.reshape(param_cupy, (out_channels, in_channels * ker_size)))
                     _, basis = self.pcaTool.pca_basic(dataArray)
-                if self.reshape_mode == "ker_dim" : 
+                elif self.reshape_mode == "ker_dim" : 
                     dataArray = cp.transpose(cp.reshape(param_cupy, (in_channels * out_channels, ker_size)))
                     _, basis = self.pcaTool.pca_basic(dataArray)
+                elif self.reshape_mode == "flatten" :
+                    dataArray = cp.ravel(param_cupy)
+                    basis = dataArray / cp.linalg.norm(dataArray)
+
+                # print distance
+                # --- This code is for checking the distance between out_dim way and in_dim way ---
+                # if out_channels == in_channels:
+                #     tmp = cp.swapaxes(param_cupy, 0, 1)
+                #     dataArray = cp.transpose(cp.reshape(tmp, (in_channels, out_channels * ker_size)))
+                #     _, basis1 = self.pcaTool.pca_basic(dataArray)
+                #     dataArray = cp.transpose(cp.reshape(param_cupy, (out_channels, in_channels * ker_size)))
+                #     _, basis2 = self.pcaTool.pca_basic(dataArray)
+                #     print("[{}] distance of out-channel and in channel way : ".format(name), end="")
+                #     print(self.smTool.calc_magnitude(basis1, basis2))
             else: # fc layer
                 out_dims = param_cupy.shape[0]
                 in_dims = param_cupy.shape[1]
 
                 # for fc layer, It is impossible to select axis for deciding number of data
-                if in_dims < out_dims:
-                    dataArray = param_cupy
-                    _, basis = self.pcaTool.pca_basic(dataArray)
+                if self.reshape_mode == "flatten" :
+                    dataArray = cp.ravel(param_cupy)
+                    basis = dataArray / cp.linalg.norm(dataArray)
                 else:
-                    dataArray = cp.transpose(param_cupy)
-                    _, basis = self.pcaTool.pca_basic(dataArray)
+                    if in_dims < out_dims:
+                        dataArray = param_cupy
+                        _, basis = self.pcaTool.pca_basic(dataArray)
+                    else:
+                        dataArray = cp.transpose(param_cupy)
+                        _, basis = self.pcaTool.pca_basic(dataArray)
+
+            # serialize
+            # --- This code is for checking the performance of vectorized orthnormal basis ---
+            # basis = cp.reshape(basis, (-1, 1), order='F')
+            # basis = basis / cp.linalg.norm(basis)
 
             # conv / fc 각각 다른 방법으로 orthonormal basis 를 만들어서 buffer 에 append
             self.buffer[name].append(basis)
