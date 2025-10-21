@@ -100,9 +100,10 @@ class OrthBasisBuffer:
                 elif self.reshape_mode == "ker_dim" : 
                     dataArray = cp.transpose(cp.reshape(param_cupy, (in_channels * out_channels, ker_size)))
                     _, basis = self.pcaTool.pca_basic(dataArray)
-                elif self.reshape_mode == "flatten" :
+                elif "flatten" in self.reshape_mode :
                     dataArray = cp.ravel(param_cupy)
                     basis = dataArray / cp.linalg.norm(dataArray)
+                    basis = cp.expand_dims(basis, axis=-1)
 
                 # print distance
                 # --- This code is for checking the distance between out_dim way and in_dim way ---
@@ -119,9 +120,10 @@ class OrthBasisBuffer:
                 in_dims = param_cupy.shape[1]
 
                 # for fc layer, It is impossible to select axis for deciding number of data
-                if self.reshape_mode == "flatten" :
+                if "flatten" in self.reshape_mode :
                     dataArray = cp.ravel(param_cupy)
                     basis = dataArray / cp.linalg.norm(dataArray)
+                    basis = cp.expand_dims(basis, axis=-1)
                 else:
                     if in_dims < out_dims:
                         dataArray = param_cupy
@@ -172,20 +174,36 @@ class OrthBasisBuffer:
             basis_next = self.buffer[name][-1]
 
             if "orth" in self.mag_mode:  # (2nd magnitude 의) along, orth component 를 계산
-                along, orth = self.smTool.calc_2nd_magnitude_decomposed(basis_prev, basis_cur, basis_next)
-                along = along.get()
-                orth = orth.get()
+                if "norm" in self.reshape_mode:
+                    vector_point = basis_cur - basis_prev
+                    vector_line = basis_next - basis_prev
+                    vector_line_normalized = vector_line / cp.linalg.norm(vector_line)
+                    along = (cp.transpose(vector_point)@vector_line_normalized).get()
+                    slope = cp.linalg.norm(vector_point).get()
+                    orth = np.sqrt(slope**2 - along[0,0]**2)
+                    along = along[0,0] - cp.linalg.norm(vector_line).get()
+                else:
+                    along, orth = self.smTool.calc_2nd_magnitude_decomposed(basis_prev, basis_cur, basis_next)
+                    along = along.get()
+                    orth = orth.get()
                 # # for debugging
                 # !
                 # print("(({:.4f}, {:.4f}))".format(along, orth), end="  ")
             else:   
                 if "1" == self.mag_mode[-1]: # 1st magnitude 를 계산
-                    mag = self.smTool.calc_magnitude(basis_prev, basis_next)
-                    mag = mag.get()
+                    if "norm" in self.reshape_mode:
+                        mag = cp.linalg.norm(basis_next - basis_prev).get()
+                    else:
+                        mag = self.smTool.calc_magnitude(basis_prev, basis_next)
+                        mag = mag.get()
                 else: # 2nd magnitude 를 계산
-                    _, k = self.smTool.calc_karcher_subspace(basis_prev, basis_next)
-                    mag = self.smTool.calc_magnitude(basis_cur, k)
-                    mag = mag.get()
+                    if "norm" in self.reshape_mode:
+                        _, k = self.smTool.calc_karcher_subspace(basis_prev, basis_next)
+                        mag = cp.linalg.norm(basis_cur - k).get()
+                    else:
+                        _, k = self.smTool.calc_karcher_subspace(basis_prev, basis_next)
+                        mag = self.smTool.calc_magnitude(basis_cur, k)
+                        mag = mag.get()
                 # for debugging
                 # !
                 # print("({:.4f})".format(mag), end="  ")      
@@ -266,20 +284,36 @@ class OrthBasisBuffer:
             basis_next = self.buffer[name][-1]
 
             if "orth" in self.mag_mode:  # (2nd magnitude 의) along, orth component 를 계산
-                along, orth = self.smTool.calc_2nd_magnitude_decomposed(basis_prev, basis_cur, basis_next)
-                along = along.get()
-                orth = orth.get()
+                if "norm" in self.reshape_mode:
+                    vector_point = basis_cur - basis_prev
+                    vector_line = basis_next - basis_prev
+                    vector_line_normalized = vector_line / cp.linalg.norm(vector_line)
+                    along = (cp.transpose(vector_point)@vector_line_normalized).get()
+                    slope = cp.linalg.norm(vector_point).get()
+                    orth = np.sqrt(slope**2 - along[0,0]**2)
+                    along = along[0,0] - cp.linalg.norm(vector_line).get()
+                else:
+                    along, orth = self.smTool.calc_2nd_magnitude_decomposed(basis_prev, basis_cur, basis_next)
+                    along = along.get()
+                    orth = orth.get()
                 # # for debugging
                 # !
                 # print("(({:.4f}, {:.4f}))".format(along, orth), end="  ")
             else:   
                 if "1" == self.mag_mode[-1]: # 1st magnitude 를 계산
-                    mag = self.smTool.calc_magnitude(basis_prev, basis_next)
-                    mag = mag.get()
+                    if "norm" in self.reshape_mode:
+                        mag = cp.linalg.norm(basis_next - basis_prev).get()
+                    else:
+                        mag = self.smTool.calc_magnitude(basis_prev, basis_next)
+                        mag = mag.get()
                 else: # 2nd magnitude 를 계산
-                    _, k = self.smTool.calc_karcher_subspace(basis_prev, basis_next)
-                    mag = self.smTool.calc_magnitude(basis_cur, k)
-                    mag = mag.get()
+                    if "norm" in self.reshape_mode:
+                        _, k = self.smTool.calc_karcher_subspace(basis_prev, basis_next)
+                        mag = cp.linalg.norm(basis_cur - k).get()
+                    else:
+                        _, k = self.smTool.calc_karcher_subspace(basis_prev, basis_next)
+                        mag = self.smTool.calc_magnitude(basis_cur, k)
+                        mag = mag.get()
                 # for debugging
                 # !
                 # print("({:.4f})".format(mag), end="  ")

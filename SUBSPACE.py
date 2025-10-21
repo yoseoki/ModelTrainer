@@ -209,6 +209,15 @@ class SubspaceDiff():
 
     def calc_2nd_magnitude_decomposed(self, basis1, basis2, basis3):
 
+        # if (len(basis1.shape) == 1) :
+        #     new_basis1 = cp.expand_dims(basis1, axis=-1)
+        #     new_basis2 = cp.expand_dims(basis2, axis=-1)
+        #     new_basis3 = cp.expand_dims(basis3, axis=-1)
+        # else:
+        #     new_basis1 = basis1
+        #     new_basis2 = basis2
+        #     new_basis3 = basis3
+
         W_tmp = cp.concatenate((basis1, basis3), axis=1)
         W, _ = cp.linalg.qr(W_tmp)
         _, M = self.calc_karcher_subspace(basis1, basis3)
