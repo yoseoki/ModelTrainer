@@ -18,6 +18,9 @@ import cupy as cp
 from PCA import WeightPCA
 from SUBSPACE import SubspaceDiff
 from itertools import chain
+import seaborn as sns
+from tqdm import tqdm
+from random import(shuffle)
 
 def smoothing(signal, w_size=3):
 
@@ -30,6 +33,36 @@ def smoothing(signal, w_size=3):
 		result.append(part[offset])
 	
 	return result
+
+def print_magContainer(magContainer):
+	if str(type(magContainer)) == "<class 'numpy.float32'>":
+		print("[{:.4f}]".format(magContainer))
+	elif len(magContainer) <= 10:
+		print("[", end="")
+		for i in range(magContainer.shape[0]):
+			if i == magContainer.shape[0] - 1: print("{:.4f}]".format(magContainer[i]))
+			else: print("{:.4f}".format(magContainer[i]), end=", ")
+	else:
+		print("[", end="")
+		for i in range(5):
+			print("{:.4f}".format(magContainer[i]), end=", ")
+		print("...", end=", ")
+		for i in range(5):
+			if i == 4: print("{:.4f}]".format(magContainer[-1]))
+			else:
+				print("{:.4f}".format(magContainer[i-5]), end=", ")
+
+def grad_scaler_creator(magContainer):
+	def grad_scaling(grad):
+		scale = torch.ones_like(grad)
+		if str(type(magContainer)) == "<class 'numpy.float32'>":
+			scale = magContainer * scale
+		else:
+			for i in range(grad.size(0)):
+				scale[i] = magContainer[i] * scale[i]
+		result = scale * grad
+		return result
+	return grad_scaling
 
 # for class which inherit modelLoader class(ex. UNetLoader, Resnet18Loader, ...)
 # need to implement _build_new_model method, _build_non_save_layers method
@@ -101,7 +134,7 @@ class modelLoader:
 					f.write("\n")
 					f.close()
 
-	def save_weight(self, epoch, is_verbose=False, is_init=False):
+	def save_weight(self, epoch, is_verbose=False, is_init=False, is_all=False):
 
 		counter = 0
 		tensors = {}
@@ -109,10 +142,11 @@ class modelLoader:
 
 		for name, param in self.model.named_parameters(): # iteration : each parameter
 			
-			nonSaveFoundFlag = False
-			for element in self.non_save_layers:
-				if element in name: nonSaveFoundFlag = True
-			if nonSaveFoundFlag: continue
+			if not is_all:
+				nonSaveFoundFlag = False
+				for element in self.non_save_layers:
+					if element in name: nonSaveFoundFlag = True
+				if nonSaveFoundFlag: continue
 
 			if is_verbose:
 				print("{} : {} | {}".format(counter+1, name, param.shape))
@@ -120,8 +154,41 @@ class modelLoader:
 			param_copied = param.detach().clone()
 			tensors["{:03d}".format(counter+1)] = param_copied
 			counter = counter + 1
-		if is_init: save_file(tensors, "./" + self.prefix_w + "/weights_epoch_init.safetensors")
-		else: save_file(tensors, "./" + self.prefix_w + "/weights_epoch{:03d}.safetensors".format(epoch))
+		if is_all:
+			if is_init:
+				torch.save(self.model.state_dict(), "./" + self.prefix_w + "/weights_epoch_init_all.pt")
+			else:
+				torch.save(self.model.state_dict(), "./" + self.prefix_w + "/weights_epoch{:03d}_all.pt".format(epoch))
+		else:
+			if is_init: save_file(tensors, "./" + self.prefix_w + "/weights_epoch_init.safetensors")
+			else: save_file(tensors, "./" + self.prefix_w + "/weights_epoch{:03d}.safetensors".format(epoch))
+
+	def save_gradient(self, epoch, is_verbose=False, is_init=False, is_all=False):
+
+		counter = 0
+		tensors = {}
+		if is_verbose: print()
+
+		for name, param in self.model.named_parameters(): # iteration : each parameter
+			
+			if not is_all:
+				nonSaveFoundFlag = False
+				for element in self.non_save_layers:
+					if element in name: nonSaveFoundFlag = True
+				if nonSaveFoundFlag: continue
+
+			if is_verbose:
+				print("{} : {} | {}".format(counter+1, name, param.shape))
+
+			grad_copied = param.grad.detach().clone()
+			tensors["{:03d}".format(counter+1)] = grad_copied
+			counter = counter + 1
+		if is_all:
+			if is_init: save_file(tensors, "./" + self.prefix_w + "/gradients_epoch_init_all.safetensors")
+			else: save_file(tensors, "./" + self.prefix_w + "/gradients_epoch{:03d}_all.safetensors".format(epoch))
+		else:
+			if is_init: save_file(tensors, "./" + self.prefix_w + "/gradients_epoch_init.safetensors")
+			else: save_file(tensors, "./" + self.prefix_w + "/gradients_epoch{:03d}.safetensors".format(epoch))
 
 class VGG16Loader(modelLoader):
 
@@ -291,6 +358,8 @@ class trainer:
 			self.calc_interval = int(self.config["calc_interval"]) if "calc_interval" in self.config else 5
 		else:
 			self.mode = "NORMAL"
+		tmp = self.mode
+		self.mode = self.config["mode"] if "mode" in self.config else tmp
 	
 	def load_model(self, model_name):
 		if model_name.upper() == "UNET":
@@ -462,13 +531,14 @@ class trainer:
 		criterion = self.load_criterion()
 		if self.mode == "NORMAL":
 			optimizer = self.load_optimizer(model)
-		elif self.mode == "ACCELERATE":
+		elif self.mode == "ACCELERATE" or self.mode == "VACCELERATE":
 			save_name, optimizer = self.load_layerwise_optimizer(model_name, model)
 			obb = buf.OrthBasisBuffer(model, save_name, self.model_loader.non_save_layers, self.square_flag, self.salt_policy, reshape_mode=self.reshape_mode, mag_mode=self.mag_mode)
 			obb.update()
-		scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=200, eta_min=0)
+		# scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=200, eta_min=0)
 
-		self.model_loader.save_weight(-1, is_verbose=is_verbose, is_init=True)
+		# save point
+		# self.model_loader.save_weight(-1, is_verbose=is_verbose, is_init=True)
 
 		print("========== training start! ==========")
 
@@ -490,6 +560,11 @@ class trainer:
 						alphas = obb.getAplhas(model_name)
 						for alpha, comp in zip(alphas, magContainer):
 							finalMagContainer.append(comp * alpha)
+						print("orig coef : ", end="")
+						for element in finalMagContainer: print("{:.4f}".format(element), end=" || ")
+						print()
+						shuffle(finalMagContainer)
+						print("perm coef : ", end="")
 						for element in finalMagContainer: print("{:.4f}".format(element), end=" || ")
 						print()
 						totalSaltedContainer.append(finalMagContainer)
@@ -499,6 +574,27 @@ class trainer:
 						mag_buffer = []
 						for _ in range(len(save_name)): mag_buffer.append([])
 						obb.clear_buffer()
+			elif self.mode == "VACCELERATE":
+				if self.calc_policy == "epoch":
+					if epoch == self.offset - 1:
+						obb.set_basis_vectorwise()
+					if epoch > self.offset - 1 and (epoch - self.offset) % self.interval == 0:
+						magContainerContainer = obb.calc_magnitude_vectorwise()
+						alphas = obb.getAplhas(model_name)
+						layerCounter = 0
+						for name, param in model.named_parameters():
+							for k, ele in enumerate(save_name):
+								if ele in name: indicator = k
+							finalMagContainer = []
+							if str(type(magContainerContainer[layerCounter])) == "<class 'numpy.float32'>":
+								finalMagContainer = (magContainerContainer[layerCounter]*alphas[indicator])
+							else:
+								for ele in magContainerContainer[layerCounter]:
+									finalMagContainer.append(ele*alphas[indicator])
+								finalMagContainer = np.array(finalMagContainer)
+							print_magContainer(finalMagContainer)
+							param.register_hook(grad_scaler_creator(finalMagContainer))
+							layerCounter += 1
 
 			model.train()
 			avg_cost = 0
@@ -533,10 +629,16 @@ class trainer:
 								for j, mag in enumerate(magContainer): mag_buffer[j].append(mag)
 
 				if i in self.sampling_step:
-					self.model_loader.save_weight(len(self.sampling_step)*epoch + self.sampling_step.index(i), is_verbose=is_verbose)
+					# save point
+					# if epoch > self.offset - 1 and (epoch - self.offset) % self.interval == 0:
+					# 	self.model_loader.save_weight(len(self.sampling_step)*epoch + self.sampling_step.index(i), is_verbose=is_verbose, is_all=True)
+					# 	self.model_loader.save_gradient(len(self.sampling_step)*epoch + self.sampling_step.index(i), is_verbose=is_verbose, is_all=True)
 					if self.mode == "ACCELERATE":
 						if self.calc_policy == "epoch":
 							obb.update()
+					elif self.mode == "VACCELERATE":
+						if self.calc_policy == "epoch":
+							obb.update_all()
 			
 			if self.mode == "ACCELERATE":
 				if self.calc_policy == "step":
@@ -587,18 +689,81 @@ class trainer:
 				self.val_acc_container.append(correct / total)
 				print('Valid Accuracy = {:>.9}%'.format(100 * correct / total))
 
-			if "finalMagContainer" in locals():
-				learningStopFlag = True
-				for mag in finalMagContainer:
-					if mag > 0.01: learningStopFlag = False
-				if learningStopFlag: break
+			# if "finalMagContainer" in locals():
+			# 	learningStopFlag = True
+			# 	for mag in finalMagContainer:
+			# 		if mag > 0.01: learningStopFlag = False
+			# 	if learningStopFlag: break
 			
-			scheduler.step()
+			# scheduler.step()
 
 		print("========== training over! ==========")
 		self.save_training_result()
 		np.savetxt("./"+ self.prefix_w + '/mag.csv', np.array(totalBaseContainer), delimiter=",")
 		np.savetxt("./"+ self.prefix_w + '/salted_mag.csv', np.array(totalSaltedContainer), delimiter=",")
+
+	def validate_geodesic(self, model_name, rdSeed, config_file_path, weight_path, gradient_path, alpha, is_verbose=False, prefix=""):
+		self.val_acc_container = []
+		self.set_seed(rdSeed)
+		self.parse_training_args(config_file_path)
+		_, testloader = self.load_DB()
+		self.non_save_layers = ["bias", "downsample.1", "bn"]
+
+		device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+		model = self.load_model(model_name).to(device)
+
+		if is_verbose:
+			a = 1
+			for name, param in model.named_parameters():
+				print("{} : {} | {}".format(a, name, param.shape))
+				a += 1
+
+		f_grad = safe_open(gradient_path, framework="pt", device="cuda" if torch.cuda.is_available() else "cpu")
+
+		names = ["conv1", "layer11.conv2", "layer21.conv2", "layer31.conv2", "layer41.conv2", "fc"]
+		names_alpha = {}
+		for i in range(len(alpha)):
+			names_alpha[names[i]] = alpha[i]
+
+		for _t in tqdm(np.linspace(0, 5, 50)):
+
+			model.load_state_dict(torch.load(weight_path, weights_only=True))
+			counter = 0
+			with torch.no_grad():
+				for name, param in model.named_parameters(): # iteration : each parameter
+
+					for ele in names:
+						if ele in name:
+							tmp = 1 + _t*(names_alpha[ele] - 1)
+							t = tmp * self.lr
+							break
+
+					counter += 1
+					grad = f_grad.get_tensor("{:03d}".format(counter))
+
+					param.add_(-t, grad)
+
+				model.eval()
+				correct = 0
+				total = 0
+				for data in testloader:
+					images, labels = data
+					images = images.to(device)
+					labels = labels.to(device)
+					outputs = model(images)
+
+					_, predicted = torch.max(outputs, 1)
+					c = (predicted == labels).squeeze()
+					for j in range(c.size(dim=0)):
+						correct += c[j].item()
+						total += 1
+				self.val_acc_container.append(correct / total)
+				# print('[t={:.4f}] Valid Accuracy = {:>.9}%'.format(_t, 100 * correct / total))
+
+		max_value = max(self.val_acc_container)
+		max_index = self.val_acc_container.index(max_value)
+		print(prefix, "max index : t={:.4f} and max value : {:.4f}".format(np.linspace(0, 5, 50)[max_index], max_value))
 
 class CIFAR10Trainer(trainer):
 

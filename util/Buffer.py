@@ -17,11 +17,15 @@ class OrthBasisBuffer:
         self.salt_policy = salt_policy
         self.mag_mode = mag_mode
         self.reshape_mode = reshape_mode
+        self.corrMatrix = None
 
         self.pcaTool = WeightPCA()
         self.smTool = SubspaceDiff()
 
         for name, _ in self.model.named_parameters(): # iteration : each parameter
+
+            self.buffer[name] = []
+            self.baseMagnitude[name] = 1
             
             saveFoundFlag = False
             nonSaveFoundFlag = False
@@ -32,9 +36,6 @@ class OrthBasisBuffer:
             if not saveFoundFlag or nonSaveFoundFlag: continue
 
             print("found! : {}".format(name))
-
-            self.buffer[name] = []
-            self.baseMagnitude[name] = 1
             
     def getAplhas(self, model_name):
 
@@ -45,6 +46,7 @@ class OrthBasisBuffer:
             elif model_name.upper() == "LENET": return [1, 1, 1, 1, 1]
         elif self.salt_policy == "direct":
             if model_name.upper() == "RESNET18_SMALL": return [16, 16, 8, 4, 2, 20]
+            elif model_name.upper() == "RESNET18": return [16, 16, 8, 4, 2, 20]
             elif model_name.upper() == "VGG16": return [4, 2, 1, 0.5, 0.5, 10]
             elif model_name.upper() == "VIT": return [6, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 17.5]
         elif self.salt_policy == "channel":
@@ -58,7 +60,7 @@ class OrthBasisBuffer:
         else:
             return None
 
-    def update(self):
+    def update(self, needCorr=False, needAll=False):
         """
         지정된 step / epoch 마다 "대표 레이어" 의 웨이트로
         subspace(orthonormal basis) 를 만들어
@@ -66,19 +68,23 @@ class OrthBasisBuffer:
         즉, 말 그대로 buffer 를 update 하는 메소드이다.
         """
         print()
+        isFirstElement = True
+        isSecondElement = False
+        isThirdElement = False
 
         for name, param in self.model.named_parameters(): # iteration : each parameter
             
             # "파라미터를 저장하는 대상 레이어" 중에서
             # "대표 레이어" 인지를 확인
             # 그렇지 않으면 continue
-            saveFoundFlag = False
-            nonSaveFoundFlag = False
-            for element in self.save_layers:
-                if element in name: saveFoundFlag = True
-            for element in self.non_save_layers:
-                if element in name: nonSaveFoundFlag = True
-            if not saveFoundFlag or nonSaveFoundFlag: continue
+            if not needAll:
+                saveFoundFlag = False
+                nonSaveFoundFlag = False
+                for element in self.save_layers:
+                    if element in name: saveFoundFlag = True
+                for element in self.non_save_layers:
+                    if element in name: nonSaveFoundFlag = True
+                if not saveFoundFlag or nonSaveFoundFlag: continue
 
             param_copied = param.detach().clone()
             param_cupy = cp.asarray(param_copied.cpu().numpy())
@@ -137,8 +143,61 @@ class OrthBasisBuffer:
             # basis = cp.reshape(basis, (-1, 1), order='F')
             # basis = basis / cp.linalg.norm(basis)
 
+            if isThirdElement:
+                isThirdElement = False
+
+            if isSecondElement:
+                if needCorr:
+                    corr = cp.abs(self.pcaTool.getCorr(dataArray))
+                    corr = corr.get()
+                    if str(type(self.corrMatrix)) == "<class 'NoneType'>": self.corrMatrix = corr
+                    else: self.corrMatrix += corr
+                    print("sum of correlation coefficients : {:.4f}".format((np.sum(corr) - np.trace(corr)) / (corr.shape[0] * (corr.shape[1] - 1))))
+                    print("corr matrix is added, shape : ", corr.shape)
+                isSecondElement = False
+                isThirdElement = True
+
+            if isFirstElement:
+                isFirstElement = False
+                isSecondElement = True
+
             # conv / fc 각각 다른 방법으로 orthonormal basis 를 만들어서 buffer 에 append
             self.buffer[name].append(basis)
+
+    def update_all(self):
+        """
+        지정된 step / epoch 마다 "대표 레이어" 의 웨이트로
+        subspace(orthonormal basis) 를 만들어
+        buffer 에 append 하는 메소드.
+        즉, 말 그대로 buffer 를 update 하는 메소드이다.
+        """
+        print()
+
+        for name, param in self.model.named_parameters(): # iteration : each parameter
+
+            param_copied = param.detach().clone()
+            param_cupy = cp.asarray(param_copied.cpu().numpy())
+
+            # Current Settings
+            # Data centerizing : False
+            if "feature" in name or "conv" in name or "cnn" in name or "downsample.0" in name: # convolution layer
+                out_channels = param_cupy.shape[0]
+                in_channels = param_cupy.shape[1]
+                ker_size = param_cupy.shape[2] * param_cupy.shape[3]
+
+                dataArray = cp.transpose(cp.reshape(param_cupy, (out_channels, in_channels * ker_size)))
+                dataArray = dataArray / cp.linalg.norm(dataArray, axis=0)
+            elif len(param_cupy.shape) == 1:
+                dataArray = param_cupy / cp.linalg.norm(param_cupy)
+            else: # fc layer
+                out_dims = param_cupy.shape[0]
+                in_dims = param_cupy.shape[1]
+
+                dataArray = cp.transpose(param_cupy)
+                dataArray = dataArray / cp.linalg.norm(dataArray, axis=0)
+
+            # conv / fc 각각 다른 방법으로 data array (normalized) 를 만들어서 buffer 에 append
+            self.buffer[name].append(dataArray)
 
     def calc_magnitude(self):
         """
@@ -148,10 +207,6 @@ class OrthBasisBuffer:
         순서 리스트 형태로 반환하는 메소드.
         이 정보는 learning rate 를 accelerate 하는 데 사용된다.
         """
-
-        if len(self.buffer[next(iter(self.buffer))]) < 3:
-            print("Not enough basis in buffer!")
-            return None
         
         result = []
         
@@ -251,6 +306,47 @@ class OrthBasisBuffer:
 
         return result
     
+    def calc_magnitude_vectorwise(self):
+        """
+        가장 최근에 append 된 3개의 subspace 를 사용해서
+        "대표 레이어" 마다 "magnitude 정보를 활용한
+        acceleration coef" 를 계산,
+        순서 리스트 형태로 반환하는 메소드.
+        이 정보는 learning rate 를 accelerate 하는 데 사용된다.
+        """
+
+        if len(self.buffer[next(iter(self.buffer))]) < 3:
+            print("Not enough basis in buffer!")
+            return None
+        
+        result = []
+        
+        for name, _ in self.model.named_parameters(): # iteration : each parameter
+
+            # 계산 대상 : 바로 직전에 계산된 3개의 orthonormal basis
+            dataArray_prev = self.buffer[name][-3]
+            dataArray_cur = self.buffer[name][-2]
+            dataArray_next = self.buffer[name][-1]
+
+            if len(dataArray_prev.shape) == 1:
+                mag = cp.linalg.norm((dataArray_prev*dataArray_next)).get()
+            else:
+                mag = cp.linalg.norm((dataArray_prev*dataArray_next), axis=0).get()
+
+            if self.square_flag:
+                logit = np.sqrt(mag / self.baseMagnitude[name])
+            else:
+                logit = mag / self.baseMagnitude[name]
+
+            result.append(logit)
+            self.buffer[name].pop(0)
+        
+        # for debugging
+        # !
+        # print()
+
+        return result
+    
     def set_basis(self):
         """
         초기 3개의 subspace 를 사용해서
@@ -259,10 +355,6 @@ class OrthBasisBuffer:
         이 정보는 accelerate coef 의 기준점으로써,
         적절히 scaling 하는 데에 사용된다.
         """
-
-        if len(self.buffer[next(iter(self.buffer))]) < 3:
-            print("Not enough basis in buffer!")
-            return None
         
         for name, _ in self.model.named_parameters(): # iteration : each parameter
             
@@ -324,6 +416,42 @@ class OrthBasisBuffer:
             else: logit = mag
 
             if logit < 1e-4: logit = 1e-4
+            self.baseMagnitude[name] = logit
+
+    def set_basis_vectorwise(self):
+        """
+        초기 3개의 subspace 를 사용해서
+        "대표 레이어" 마다 "acceleration coef 의 기준점" 을 계산,
+        클래스 내 사전형 변수에 저장하는 메소드.
+        이 정보는 accelerate coef 의 기준점으로써,
+        적절히 scaling 하는 데에 사용된다.
+        """
+
+        if len(self.buffer[next(iter(self.buffer))]) < 3:
+            print("Not enough basis in buffer!")
+            return None
+        
+        for name, _ in self.model.named_parameters(): # iteration : each parameter
+
+            # 계산 대상 : 바로 직전에 계산된 3개의 orthonormal basis
+            # 반드시 calc_2nd_magnitude 전에 호출되어 기준점을 미리 계산해야 함.
+            dataArray_prev = self.buffer[name][-3]
+            dataArray_cur = self.buffer[name][-2]
+            dataArray_next = self.buffer[name][-1]
+
+            if len(dataArray_prev.shape) == 1:
+                mag = cp.linalg.norm((dataArray_prev*dataArray_next)).get()
+            else:
+                mag = cp.linalg.norm((dataArray_prev*dataArray_next), axis=0).get()
+
+            # 기준점 : 초기 orth(mag) component of 2nd magnitude
+            # 단, 1e-4 보다 작은 값은 오차라고 보고 사용하지 않음
+            logit = mag
+            if len(dataArray_prev.shape) == 1:
+                if logit < 1e-4: logit = 1e-4
+            else:
+                for i in range(logit.shape[0]):
+                    if logit[i] < 1e-4: logit[i] = 1e-4
             self.baseMagnitude[name] = logit
 
     def set_basis_manually(self, basisList):
