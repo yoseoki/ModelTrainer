@@ -783,7 +783,7 @@ class VGG16(nn.Module):
 			self.conv_3_block(8*base_dim,8*base_dim), #512
 		)
 		# self.orth_basis = self.random_orthonormal_basis(4096, num_classes)
-		self.connect_fc = nn.Linear(8*base_dim*1*1, 10)
+		self.connect_fc = nn.Linear(8*base_dim*1*1, num_classes)
 		self.fc_relu = nn.ReLU(True)
 		# self.connect_fc = nn.Sequential(
 		# 	nn.Linear(8*base_dim*1*1, 10),
