@@ -11,7 +11,7 @@ from util import CNNModel as nmc
 from util import Buffer as buf
 import matplotlib.pyplot as plt
 import math
-import json
+import json 
 from overrides import overrides
 from safetensors.torch import save_file, safe_open
 import cupy as cp
@@ -21,6 +21,7 @@ from itertools import chain
 import seaborn as sns
 from tqdm import tqdm
 from random import(shuffle)
+from autoaugment import CIFAR10Policy
 
 def smoothing(signal, w_size=3):
 
@@ -338,8 +339,17 @@ class trainer:
 		self.epochs = int(self.config["epochs"])
 		self.batch_size = int(self.config["batch_size"])
 		self.sampling_step = list(map(int, self.config["sampling_step"]))
+		if "save_flag" in self.config:
+			if self.config["save_flag"].lower() == 'true':
+				self.save_flag = True
+			elif self.config["save_flag"].lower() == 'false':
+				self.save_flag = False
+		else:
+			self.save_flag = False
 		self.optimizer = self.config["optimizer"] # options : "SGD", "ADAM"
 		self.criterion = self.config["criterion"] # options : "CE"
+		self.is_weight_decay = True if "weight_decay" in self.config else False
+		self.weight_decay = float(self.config["weight_decay"]) if "weight_decay" in self.config else 0.0
 		if "offset" in self.config or "interval" in self.config:
 			self.mode = "ACCELERATE"
 			self.mag_mode = self.config["mag_mode"] if "mag_mode" in self.config else "orth"
@@ -356,8 +366,11 @@ class trainer:
 			self.salt_policy = self.config["salt_policy"] if "salt_policy" in self.config else "none" # options : "none", "direct", "inverse", "xavier", "he"
 			self.calc_policy = self.config["calc_policy"] if "calc_policy" in self.config else "epoch" # options : "epoch", "step"
 			self.calc_interval = int(self.config["calc_interval"]) if "calc_interval" in self.config else 5
+			self.is_mean = True if "mean" in self.config else False
+			self.mean_beta = float(self.config["mean"]) if "mean" in self.config else -1.0
 		else:
 			self.mode = "NORMAL"
+			self.schedule = self.config["schedule"] if "schedule" in self.config else None
 		tmp = self.mode
 		self.mode = self.config["mode"] if "mode" in self.config else tmp
 	
@@ -392,6 +405,10 @@ class trainer:
 			return torch.optim.SGD(model.parameters(), lr=self.lr, momentum=0.9)
 		elif self.optimizer == "ADAM":
 			return torch.optim.Adam(model.parameters(), lr=self.lr)
+		elif self.optimizer == "SGDW":
+			return torch.optim.SGD(model.parameters(), lr=self.lr, momentum=0.9, weight_decay=self.weight_decay)
+		elif self.optimizer == "ADAMW":
+			return torch.optim.AdamW(model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
 	
 	def load_layerwise_optimizer(self, model_name, model):
 		if self.optimizer == "SGD":
@@ -424,7 +441,7 @@ class trainer:
 					{'params': chain(model.layer31.parameters(), model.layer32.parameters()), 'lr': self.lr, 'momentum' : 0.9},
 					{'params': chain(model.layer41.parameters(), model.layer42.parameters()), 'lr': self.lr, 'momentum' : 0.9},
 					{'params': model.fc.parameters(), 'lr': self.lr, 'momentum' : 0.9}
-					])
+					], weight_decay=self.weight_decay)
 			elif model_name.upper() == "RESNET50":
 				name = ["conv1", "conv2_x.1.convseq.1.conv", "conv3_x.1.convseq.1.conv", "conv4_x.1.convseq.1.conv", "conv5_x.0.convseq.1.conv", "fc"]
 				return name, torch.optim.SGD([
@@ -456,9 +473,9 @@ class trainer:
 					{'params': model[1][10].parameters(), 'lr': self.lr, 'momentum' : 0.9},
 					{'params': model[1][11].parameters(), 'lr': self.lr, 'momentum' : 0.9},
 					{'params': model[2].parameters(), 'lr': self.lr, 'momentum' : 0.9}
-					])
+					], weight_decay=self.weight_decay)
 			elif model_name.upper() == "LENET":
-				name = ["cnn1", "cnn2", "fc1", "fc2", "fc3"]
+				name = ["cnn1.weight", "cnn2.weight", "fc1.weight", "fc2.weight", "fc3.weight"]
 				return name, torch.optim.SGD([
 					{'params': model.cnn1.parameters(), 'lr': self.lr, 'momentum' : 0.9},
 					{'params': model.cnn2.parameters(), 'lr': self.lr, 'momentum' : 0.9},
@@ -513,6 +530,171 @@ class trainer:
 		# plt.show()
 		plt.clf()
 
+	def _gradient_projection_RESNET18(self, model, finalMagContainer, epoch, i):
+		for p in chain(model.conv1.parameters(), model.bn1.parameters()):
+			if p.grad is None:
+				continue
+
+			# vectorize
+			w = p.view(-1)
+			g = p.grad.view(-1)
+			w_norm_sq = torch.dot(w, w)
+			if w_norm_sq == 0:
+				continue
+
+			if epoch == self.offset and i == 0 and not printFlag:
+				printFlag = True
+				print("Currently directional gradient is magnified!")
+
+			projected_grad = (torch.dot(g, w) / w_norm_sq) * w # 1. projection of grad onto weight direction
+			g_orth = g - projected_grad # 2. subtract projected component
+			g_orth.mul_(finalMagContainer[0]) # 3. scale remaining gradient
+			# g_new = projected_grad + g_orth # 4. add projected component back
+			p.grad.copy_(g_orth.view_as(p)) # reshape back
+
+		for p in chain(model.layer11.parameters(), model.layer12.parameters()):
+			if p.grad is None:
+				continue
+
+			# vectorize
+			w = p.view(-1)
+			g = p.grad.view(-1)
+			w_norm_sq = torch.dot(w, w)
+			if w_norm_sq == 0:
+				continue
+
+			projected_grad = (torch.dot(g, w) / w_norm_sq) * w # 1. projection of grad onto weight direction
+			g_orth = g - projected_grad # 2. subtract projected component
+			g_orth.mul_(finalMagContainer[1]) # 3. scale remaining gradient
+			# g_new = projected_grad + g_orth # 4. add projected component back
+			p.grad.copy_(g_orth.view_as(p)) # reshape back
+
+		for p in chain(model.layer21.parameters(), model.layer22.parameters()):
+			if p.grad is None:
+				continue
+
+			# vectorize
+			w = p.view(-1)
+			g = p.grad.view(-1)
+			w_norm_sq = torch.dot(w, w)
+			if w_norm_sq == 0:
+				continue
+
+			projected_grad = (torch.dot(g, w) / w_norm_sq) * w # 1. projection of grad onto weight direction
+			g_orth = g - projected_grad # 2. subtract projected component
+			g_orth.mul_(finalMagContainer[2]) # 3. scale remaining gradient
+			# g_new = projected_grad + g_orth # 4. add projected component back
+			p.grad.copy_(g_orth.view_as(p)) # reshape back
+
+		for p in chain(model.layer31.parameters(), model.layer32.parameters()):
+			if p.grad is None:
+				continue
+
+			# vectorize
+			w = p.view(-1)
+			g = p.grad.view(-1)
+			w_norm_sq = torch.dot(w, w)
+			if w_norm_sq == 0:
+				continue
+
+			projected_grad = (torch.dot(g, w) / w_norm_sq) * w # 1. projection of grad onto weight direction
+			g_orth = g - projected_grad # 2. subtract projected component
+			g_orth.mul_(finalMagContainer[3]) # 3. scale remaining gradient
+			# g_new = projected_grad + g_orth # 4. add projected component back
+			p.grad.copy_(g_orth.view_as(p)) # reshape back
+
+		for p in chain(model.layer41.parameters(), model.layer42.parameters()):
+			if p.grad is None:
+				continue
+
+			# vectorize
+			w = p.view(-1)
+			g = p.grad.view(-1)
+			w_norm_sq = torch.dot(w, w)
+			if w_norm_sq == 0:
+				continue
+
+			projected_grad = (torch.dot(g, w) / w_norm_sq) * w # 1. projection of grad onto weight direction
+			g_orth = g - projected_grad # 2. subtract projected component
+			g_orth.mul_(finalMagContainer[4]) # 3. scale remaining gradient
+			# g_new = projected_grad + g_orth # 4. add projected component back
+			p.grad.copy_(g_orth.view_as(p)) # reshape back
+
+		for p in model.fc.parameters():
+			if p.grad is None:
+				continue
+
+			# vectorize
+			w = p.view(-1)
+			g = p.grad.view(-1)
+			w_norm_sq = torch.dot(w, w)
+			if w_norm_sq == 0:
+				continue
+
+			projected_grad = (torch.dot(g, w) / w_norm_sq) * w # 1. projection of grad onto weight direction
+			g_orth = g - projected_grad # 2. subtract projected component
+			g_orth.mul_(finalMagContainer[5]) # 3. scale remaining gradient
+			# g_new = projected_grad + g_orth # 4. add projected component back
+			p.grad.copy_(g_orth.view_as(p)) # reshape back
+
+	def _gradient_projection_VIT(self, model, finalMagContainer, epoch, i):
+		for p in model[0].parameters():
+
+			if p.grad is None:
+				continue
+
+			# vectorize
+			w = p.view(-1)
+			g = p.grad.view(-1)
+			w_norm_sq = torch.dot(w, w)
+			if w_norm_sq == 0:
+				continue
+
+			if epoch == self.offset and i == 0 and not printFlag:
+				printFlag = True
+				print("Currently directional gradient is magnified!")
+
+			projected_grad = (torch.dot(g, w) / w_norm_sq) * w # 1. projection of grad onto weight direction
+			g_orth = g - projected_grad # 2. subtract projected component
+			g_orth.mul_(finalMagContainer[0]) # 3. scale remaining gradient
+			# g_new = projected_grad + g_orth # 4. add projected component back
+			p.grad.copy_(g_orth.view_as(p)) # reshape back
+
+		for middleIndex in range(12):
+			for p in model[1][middleIndex].parameters():
+				if p.grad is None:
+					continue
+
+				# vectorize
+				w = p.view(-1)
+				g = p.grad.view(-1)
+				w_norm_sq = torch.dot(w, w)
+				if w_norm_sq == 0:
+					continue
+
+				projected_grad = (torch.dot(g, w) / w_norm_sq) * w # 1. projection of grad onto weight direction
+				g_orth = g - projected_grad # 2. subtract projected component
+				g_orth.mul_(finalMagContainer[1+middleIndex]) # 3. scale remaining gradient
+				# g_new = projected_grad + g_orth # 4. add projected component back
+				p.grad.copy_(g_orth.view_as(p)) # reshape back
+
+		for p in model[2].parameters():
+			if p.grad is None:
+				continue
+
+			# vectorize
+			w = p.view(-1)
+			g = p.grad.view(-1)
+			w_norm_sq = torch.dot(w, w)
+			if w_norm_sq == 0:
+				continue
+
+			projected_grad = (torch.dot(g, w) / w_norm_sq) * w # 1. projection of grad onto weight direction
+			g_orth = g - projected_grad # 2. subtract projected component
+			g_orth.mul_(finalMagContainer[13]) # 3. scale remaining gradient
+			# g_new = projected_grad + g_orth # 4. add projected component back
+			p.grad.copy_(g_orth.view_as(p)) # reshape back
+
 	def training(self, model_name, rdSeed, config_file_path, is_verbose=False, mode=None):
 		self.set_seed(rdSeed)
 		self.prepare_save_folder(model_name, mode=mode)
@@ -531,14 +713,25 @@ class trainer:
 		criterion = self.load_criterion()
 		if self.mode == "NORMAL":
 			optimizer = self.load_optimizer(model)
+			if self.schedule == "COS":
+				scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.epochs, eta_min=0)
+			elif self.schedule == "CYCLE":
+				if "ADAM" in self.optimizer:
+					scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=self.lr, steps_per_epoch=len(trainloader), epochs=self.epochs, pct_start=0.2, div_factor=10, final_div_factor=1e3, anneal_strategy="cos", cycle_momentum=False)
+				else:
+					scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=self.lr, steps_per_epoch=len(trainloader), epochs=self.epochs, pct_start=0.3, div_factor=25, final_div_factor=1e4, anneal_strategy="cos", cycle_momentum=True, base_momentum=0.85, max_momentum=0.95)
+			else:
+				scheduler = None
+
 		elif self.mode == "ACCELERATE" or self.mode == "VACCELERATE":
 			save_name, optimizer = self.load_layerwise_optimizer(model_name, model)
 			obb = buf.OrthBasisBuffer(model, save_name, self.model_loader.non_save_layers, self.square_flag, self.salt_policy, reshape_mode=self.reshape_mode, mag_mode=self.mag_mode)
 			obb.update()
-		# scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=200, eta_min=0)
-
+			scheduler = None
+		
 		# save point
-		# self.model_loader.save_weight(-1, is_verbose=is_verbose, is_init=True)
+		if self.save_flag:
+			self.model_loader.save_weight(-1, is_verbose=is_verbose, is_init=True)
 
 		print("========== training start! ==========")
 
@@ -554,21 +747,39 @@ class trainer:
 					if epoch == self.offset - 1:
 						obb.set_basis()
 					if epoch > self.offset - 1 and (epoch - self.offset) % self.interval == 0:
+
+						# basic part for calculating magnitude
 						magContainer = obb.calc_magnitude()
 						totalBaseContainer.append(magContainer)
-						finalMagContainer = []
+
+						# weightened mean
+						if self.is_mean:
+							if len(totalSaltedContainer) == 0: finalMagContainer = [1.0 for _ in range(len(magContainer))]
+							else: finalMagContainer = totalSaltedContainer[-1]
+						# normal
+						else:
+							finalMagContainer = []
+
 						alphas = obb.getAplhas(model_name)
-						for alpha, comp in zip(alphas, magContainer):
-							finalMagContainer.append(comp * alpha)
+
+						# weightened mean
+						if self.is_mean:
+							for lIndex in range(len(magContainer)):
+								finalMagContainer[lIndex] = self.mean_beta*finalMagContainer[lIndex] + self.mean_beta*(magContainer[lIndex] * alphas[lIndex])
+						# normal
+						else:
+							for alpha, comp in zip(alphas, magContainer):
+								finalMagContainer.append(comp * alpha)
+
+						print()
 						print("orig coef : ", end="")
 						for element in finalMagContainer: print("{:.4f}".format(element), end=" || ")
 						print()
-						shuffle(finalMagContainer)
-						print("perm coef : ", end="")
-						for element in finalMagContainer: print("{:.4f}".format(element), end=" || ")
-						print()
+
 						totalSaltedContainer.append(finalMagContainer)
-						self.update_optimizer(optimizer, finalMagContainer)
+						if not self.is_weight_decay:
+							self.update_optimizer(optimizer, finalMagContainer)
+
 				elif self.calc_policy == "step":
 					if epoch == self.offset - 1 or (epoch > self.offset - 1 and (epoch - self.offset) % self.interval == 0):
 						mag_buffer = []
@@ -609,9 +820,23 @@ class trainer:
 				optimizer.zero_grad()
 				prediction = model(X)
 				cost = criterion(prediction, Y)
-
 				cost.backward()
+
+				if self.mode == "ACCELERATE" and self.is_weight_decay:
+					with torch.no_grad():
+						if "finalMagContainer" in locals():
+							printFlag = False
+
+							if "RESNET18" == model_name.upper():
+								self._gradient_projection_RESNET18(model, finalMagContainer, epoch, i)
+
+							elif "VIT" == model_name.upper():
+								self._gradient_projection_VIT(model, finalMagContainer, epoch, i)
+
 				optimizer.step()
+				if scheduler:
+					if self.schedule == "CYCLE":
+						scheduler.step()
 				avg_cost += cost.item()
 
 				if self.mode == "ACCELERATE":
@@ -630,9 +855,10 @@ class trainer:
 
 				if i in self.sampling_step:
 					# save point
-					# if epoch > self.offset - 1 and (epoch - self.offset) % self.interval == 0:
-					# 	self.model_loader.save_weight(len(self.sampling_step)*epoch + self.sampling_step.index(i), is_verbose=is_verbose, is_all=True)
-					# 	self.model_loader.save_gradient(len(self.sampling_step)*epoch + self.sampling_step.index(i), is_verbose=is_verbose, is_all=True)
+					if self.save_flag:
+						if epoch > self.offset - 1 and (epoch - self.offset) % self.interval == 0:
+							self.model_loader.save_weight(len(self.sampling_step)*epoch + self.sampling_step.index(i), is_verbose=is_verbose, is_all=True)
+							self.model_loader.save_gradient(len(self.sampling_step)*epoch + self.sampling_step.index(i), is_verbose=is_verbose, is_all=True)
 					if self.mode == "ACCELERATE":
 						if self.calc_policy == "epoch":
 							obb.update()
@@ -681,9 +907,12 @@ class trainer:
 					labels = labels.to(device)
 					outputs = model(images)
 
+					# size of outputs : (batch_size, num_classes(=10))
+					# torch.max finds the index with maximum value in each data of batch
+					# ex. [0.01, 0.01, 0.01, ... 0.91, 0.01] -> 8(index of 0.91)
 					_, predicted = torch.max(outputs, 1)
-					c = (predicted == labels).squeeze()
-					for j in range(c.size(dim=0)):
+					c = (predicted == labels).squeeze() # [8, 1, 4, 3] vs [8, 2, 4, 4] -> [1, 0, 1, 0]
+					for j in range(c.size(dim=0)): # [1, 0, 1, 0] -> correct += 2, total += 4
 						correct += c[j].item()
 						total += 1
 				self.val_acc_container.append(correct / total)
@@ -695,7 +924,9 @@ class trainer:
 			# 		if mag > 0.01: learningStopFlag = False
 			# 	if learningStopFlag: break
 			
-			# scheduler.step()
+			if scheduler:
+				if self.schedule == "COS":
+					scheduler.step()
 
 		print("========== training over! ==========")
 		self.save_training_result()
@@ -771,6 +1002,7 @@ class CIFAR10Trainer(trainer):
 	def load_DB(self):
 		transform = transforms.Compose(
 		[
+		# CIFAR10Policy(),
 		transforms.ToTensor(),
 		transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
 		])
@@ -790,3 +1022,59 @@ class CIFAR10Trainer(trainer):
 	@overrides
 	def build_num_classes(self):
 		self.num_classes = 10 # class number of CIFAR10
+
+class SVHNTrainer(trainer):
+
+	@overrides
+	def load_DB(self):
+		transform = transforms.Compose(
+		[
+		# transforms.Resize(224),
+		# transforms.CenterCrop(224),
+		transforms.ToTensor(),
+		transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+		])
+
+		trainset = torchvision.datasets.SVHN(root='DB', split="train",
+												download=True, transform=transform)
+		trainloader = torch.utils.data.DataLoader(trainset, batch_size=self.batch_size,
+												shuffle=True, num_workers=2)
+
+		testset = torchvision.datasets.SVHN(root='DB', split="test",
+											download=True, transform=transform)
+		testloader = torch.utils.data.DataLoader(testset, batch_size=self.batch_size,
+												shuffle=True, num_workers=2)
+		
+		return trainloader, testloader
+
+	@overrides
+	def build_num_classes(self):
+		self.num_classes = 10 # class number of SVHN
+
+class CIFAR100Trainer(trainer):
+
+	@overrides
+	def load_DB(self):
+		transform = transforms.Compose(
+		[
+		# transforms.Resize(64),
+        # CIFAR10Policy(),
+		transforms.ToTensor(),
+		transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+		])
+
+		trainset = torchvision.datasets.CIFAR100(root='DB', train=True,
+												download=True, transform=transform)
+		trainloader = torch.utils.data.DataLoader(trainset, batch_size=self.batch_size,
+												shuffle=True, num_workers=2)
+
+		testset = torchvision.datasets.CIFAR100(root='DB', train=False,
+											download=True, transform=transform)
+		testloader = torch.utils.data.DataLoader(testset, batch_size=self.batch_size,
+												shuffle=True, num_workers=2)
+		
+		return trainloader, testloader
+
+	@overrides
+	def build_num_classes(self):
+		self.num_classes = 100 # class number of CIFAR10
