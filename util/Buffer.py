@@ -4,6 +4,7 @@ import numpy as np
 import cupy as cp
 from PCA import WeightPCA
 from SUBSPACE import SubspaceDiff
+from CONE import WeightCONE, ConeDiff
 
 class OrthBasisBuffer:
     
@@ -21,6 +22,8 @@ class OrthBasisBuffer:
 
         self.pcaTool = WeightPCA()
         self.smTool = SubspaceDiff()
+        self.coneTool = WeightCONE()
+        self.coneSmTool = ConeDiff()
 
         for name, _ in self.model.named_parameters(): # iteration : each parameter
 
@@ -46,9 +49,9 @@ class OrthBasisBuffer:
             elif model_name.upper() == "LENET": return [1, 1, 1, 1, 1]
         elif self.salt_policy == "direct":
             if model_name.upper() == "RESNET18_SMALL": return [16, 16, 8, 4, 2, 20]
-            elif model_name.upper() == "RESNET18": return [16, 16, 8, 4, 2, 20]
+            elif model_name.upper() == "RESNET18": return [16, 8, 4, 2, 1, 15]
             elif model_name.upper() == "VGG16": return [4, 2, 1, 0.5, 0.5, 10]
-            elif model_name.upper() == "VIT": return [6, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 17.5]
+            elif model_name.upper() == "VIT": return [6, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 17.5] # for 768 : [3.4, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 8.7]
         elif self.salt_policy == "channel":
             if model_name.upper() == "RESNET18_SMALL": return [45, 16, 8, 4, 2, 3.5]
             elif model_name.upper() == "VGG16": return [4, 2, 1, 0.5, 0.5, 1]
@@ -56,6 +59,9 @@ class OrthBasisBuffer:
         elif self.salt_policy == "xavier":
             if model_name.upper() == "RESNET18_SMALL": return [4, 4, 3, 2, 1.5, 4]
             elif model_name.upper() == "VGG16": return [2, 1.5, 1, 0.7, 0.7, 2]
+            # for 768 : [1.75, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 1.8]
+            # for 192 : [3, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 3.5]
+            # mediate : [2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2.2]
             elif model_name.upper() == "VIT": return [3, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 3.5]
         else:
             return None
@@ -110,6 +116,13 @@ class OrthBasisBuffer:
                     dataArray = cp.ravel(param_cupy)
                     basis = dataArray / cp.linalg.norm(dataArray)
                     basis = cp.expand_dims(basis, axis=-1)
+                elif self.reshape_mode == "in_cone" :
+                    tmp = cp.swapaxes(param_cupy, 0, 1)
+                    dataArray = cp.transpose(cp.reshape(tmp, (in_channels, out_channels * ker_size)))
+                    basis = self.coneTool.nmf_basic(dataArray)
+                elif self.reshape_mode == "out_cone" :
+                    dataArray = cp.transpose(cp.reshape(param_cupy, (out_channels, in_channels * ker_size)))
+                    basis = self.coneTool.nmf_basic(dataArray)
 
                 # print distance
                 # --- This code is for checking the distance between out_dim way and in_dim way ---
@@ -130,6 +143,13 @@ class OrthBasisBuffer:
                     dataArray = cp.ravel(param_cupy)
                     basis = dataArray / cp.linalg.norm(dataArray)
                     basis = cp.expand_dims(basis, axis=-1)
+                elif "cone" in self.reshape_mode :
+                    if in_dims < out_dims:
+                        dataArray = param_cupy
+                        basis = self.coneTool.nmf_basic(dataArray)
+                    else:
+                        dataArray = cp.transpose(param_cupy)
+                        basis = self.coneTool.nmf_basic(dataArray)
                 else:
                     if in_dims < out_dims:
                         dataArray = param_cupy
@@ -163,6 +183,10 @@ class OrthBasisBuffer:
 
             # conv / fc 각각 다른 방법으로 orthonormal basis 를 만들어서 buffer 에 append
             self.buffer[name].append(basis)
+            if len(self.buffer[name]) > 5:
+                self.buffer[name].pop(0)
+        
+        cp.get_default_memory_pool().free_all_blocks()
 
     def update_all(self):
         """
@@ -237,6 +261,14 @@ class OrthBasisBuffer:
                     slope = cp.linalg.norm(vector_point).get()
                     orth = np.sqrt(slope**2 - along[0,0]**2)
                     along = along[0,0] - cp.linalg.norm(vector_line).get()
+                elif "cone" in self.reshape_mode:
+                    a = self.coneSmTool.calc_similarity(basis_prev, basis_cur)
+                    b = self.coneSmTool.calc_similarity(basis_cur, basis_next)
+                    c = self.coneSmTool.calc_similarity(basis_prev, basis_next)
+                    s = (a + b + c) / 2
+                    area = np.sqrt(s * (s - a) * (s - b) * (s - c))
+                    orth = 2 * area / c
+                    along = np.sqrt(a**2 - orth**2)
                 else:
                     along, orth = self.smTool.calc_2nd_magnitude_decomposed(basis_prev, basis_cur, basis_next)
                     along = along.get()
@@ -248,6 +280,8 @@ class OrthBasisBuffer:
                 if "1" == self.mag_mode[-1]: # 1st magnitude 를 계산
                     if "norm" in self.reshape_mode:
                         mag = cp.linalg.norm(basis_next - basis_prev).get()
+                    elif "cone" in self.reshape_mode:
+                        mag = self.coneSmTool.calc_similarity(basis_prev, basis_next)
                     else:
                         mag = self.smTool.calc_magnitude(basis_prev, basis_next)
                         mag = mag.get()
@@ -286,13 +320,13 @@ class OrthBasisBuffer:
             # orth component = 1e-4 를 사용
             if self.square_flag:
                 if "orth" in self.mag_mode:
-                    if abs(orth) < 1e-4 and abs(along) > 1e-4: logit = np.sqrt(1e-4 / self.baseMagnitude[name])
-                    else: logit = np.sqrt(abs(orth) / self.baseMagnitude[name])
+                    if abs(orth) < 1e-5 and abs(along) > 1e-5: logit = (1e-5 / self.baseMagnitude[name])**(0.5)
+                    else: logit = (abs(orth) / self.baseMagnitude[name])**(0.5)
                 else:
-                    logit = np.sqrt(abs(mag) / self.baseMagnitude[name])
+                    logit = (abs(mag) / self.baseMagnitude[name])**(0.5)
             else:
                 if "orth" in self.mag_mode:
-                    if abs(orth) < 1e-4 and abs(along) > 1e-4: logit = 1e-4 / self.baseMagnitude[name]
+                    if abs(orth) < 1e-5 and abs(along) > 1e-5: logit = 1e-5 / self.baseMagnitude[name]
                     else: logit = abs(orth) / self.baseMagnitude[name]
                 else:
                     logit = abs(mag) / self.baseMagnitude[name]
@@ -384,6 +418,14 @@ class OrthBasisBuffer:
                     slope = cp.linalg.norm(vector_point).get()
                     orth = np.sqrt(slope**2 - along[0,0]**2)
                     along = along[0,0] - cp.linalg.norm(vector_line).get()
+                elif "cone" in self.reshape_mode:
+                    a = self.coneSmTool.calc_similarity(basis_prev, basis_cur)
+                    b = self.coneSmTool.calc_similarity(basis_cur, basis_next)
+                    c = self.coneSmTool.calc_similarity(basis_prev, basis_next)
+                    s = (a + b + c) / 2
+                    area = np.sqrt(s * (s - a) * (s - b) * (s - c))
+                    orth = 2 * area / c
+                    along = np.sqrt(a**2 - orth**2)
                 else:
                     along, orth = self.smTool.calc_2nd_magnitude_decomposed(basis_prev, basis_cur, basis_next)
                     along = along.get()
@@ -395,6 +437,8 @@ class OrthBasisBuffer:
                 if "1" == self.mag_mode[-1]: # 1st magnitude 를 계산
                     if "norm" in self.reshape_mode:
                         mag = cp.linalg.norm(basis_next - basis_prev).get()
+                    elif "cone" in self.reshape_mode:
+                        mag = self.coneSmTool.calc_similarity(basis_prev, basis_next)
                     else:
                         mag = self.smTool.calc_magnitude(basis_prev, basis_next)
                         mag = mag.get()
@@ -415,7 +459,7 @@ class OrthBasisBuffer:
             if "orth" in self.mag_mode: logit = orth
             else: logit = mag
 
-            if logit < 1e-4: logit = 1e-4
+            if logit < 1e-5: logit = 1e-5
             self.baseMagnitude[name] = logit
 
     def set_basis_vectorwise(self):
