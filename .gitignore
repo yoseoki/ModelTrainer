@@ -3,6 +3,9 @@
 *.out
 *.log
 
+# ignore all script file
+*.sh
+
 # ignore all training_result folder
 ./**/VGG16*/
 ./**/RESNET18*/
