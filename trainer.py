@@ -531,6 +531,7 @@ class trainer:
 		plt.clf()
 
 	def _gradient_projection_RESNET18(self, model, finalMagContainer, epoch, i):
+		printFlag = False
 		for p in chain(model.conv1.parameters(), model.bn1.parameters()):
 			if p.grad is None:
 				continue
@@ -638,6 +639,7 @@ class trainer:
 			p.grad.copy_(g_orth.view_as(p)) # reshape back
 
 	def _gradient_projection_VIT(self, model, finalMagContainer, epoch, i):
+		printFlag = False
 		for p in model[0].parameters():
 
 			if p.grad is None:
@@ -825,8 +827,6 @@ class trainer:
 				if self.mode == "ACCELERATE" and self.is_weight_decay:
 					with torch.no_grad():
 						if "finalMagContainer" in locals():
-							printFlag = False
-
 							if "RESNET18" == model_name.upper():
 								self._gradient_projection_RESNET18(model, finalMagContainer, epoch, i)
 
