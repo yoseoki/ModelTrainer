@@ -22,6 +22,7 @@ import seaborn as sns
 from tqdm import tqdm
 from random import(shuffle)
 from autoaugment import CIFAR10Policy
+from random import shuffle
 
 def smoothing(signal, w_size=3):
 
@@ -367,6 +368,7 @@ class trainer:
 			self.calc_policy = self.config["calc_policy"] if "calc_policy" in self.config else "epoch" # options : "epoch", "step"
 			self.calc_interval = int(self.config["calc_interval"]) if "calc_interval" in self.config else 5
 			self.is_mean = True if "mean" in self.config else False
+			self.layerwise_mode = self.config["layerwise_mode"] if "layerwise_mode" in self.config else "normal"
 			self.mean_beta = float(self.config["mean"]) if "mean" in self.config else -1.0
 		else:
 			self.mode = "NORMAL"
@@ -772,6 +774,12 @@ class trainer:
 						else:
 							for alpha, comp in zip(alphas, magContainer):
 								finalMagContainer.append(comp * alpha)
+
+						if self.layerwise_mode == "mean":
+							average_mag = sum(finalMagContainer) / len(finalMagContainer)
+							for i in range(len(finalMagContainer)): finalMagContainer[i] = average_mag
+						elif self.layerwise_mode == "shuffle":
+							shuffle(finalMagContainer)
 
 						print()
 						print("orig coef : ", end="")
